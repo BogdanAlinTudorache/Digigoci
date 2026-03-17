@@ -1,4 +1,12 @@
 import SwiftUI
+import AppKit
+
+// MARK: - App Identity
+
+let appName    = "Digigoci"
+let appVersion = "2.0.0"
+let appTagline = "A pixel-art cat companion that lives in your menu bar — feed it, play with it, keep it alive."
+let githubRepo = "BogdanAlinTudorache/Digigoci"
 
 // MARK: - Color Extension
 
@@ -6,7 +14,21 @@ extension Color {
     init(hex: String) {
         var s = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
         var n: UInt64 = 0; Scanner(string: s).scanHexInt64(&n)
-        self.init(red: Double((n >> 16) & 0xFF)/255, green: Double((n >> 8) & 0xFF)/255, blue: Double(n & 0xFF)/255)
+        self.init(
+            red:   Double((n >> 16) & 0xFF) / 255,
+            green: Double((n >> 8)  & 0xFF) / 255,
+            blue:  Double( n        & 0xFF) / 255
+        )
+    }
+}
+
+// MARK: - Cursor Extension
+
+extension View {
+    func cursor(_ cursor: NSCursor) -> some View {
+        self.onHover { inside in
+            if inside { cursor.push() } else { NSCursor.pop() }
+        }
     }
 }
 
@@ -30,8 +52,28 @@ enum PetAge: String {
     var label: String { rawValue.capitalized }
 }
 
-enum ViewMode { case pet, settings }
-enum AppTheme: String, CaseIterable { case system, light, dark }
+enum ViewMode: String, CaseIterable {
+    case pet      = "Pet"
+    case settings = "Settings"
+
+    var icon: String {
+        switch self {
+        case .pet:      return "pawprint.fill"
+        case .settings: return "gearshape"
+        }
+    }
+}
+
+enum AppTheme: String, CaseIterable {
+    case system = "System"
+    case light  = "Light"
+    case dark   = "Dark"
+}
+
+enum ColorPreset: String, CaseIterable {
+    case `default`  = "Default"
+    case tokyoNight = "Tokyo Night"
+}
 
 // MARK: - Storage
 
@@ -66,8 +108,11 @@ final class PetMonitor: NSObject, ObservableObject {
     @Published var pet: PetState = PetState()
     @Published var currentView: ViewMode = .pet
     @Published var actionFeedback: String? = nil
+    @Published var updateStatus: String = ""
+    @Published var isCheckingUpdate: Bool = false
 
-    @AppStorage("appTheme") var appTheme: String = "system"
+    @AppStorage("appTheme")    var appTheme:    String = "system"
+    @AppStorage("colorPreset") var colorPreset: String = "default"
 
     private var decayTimer: Timer?
     private var saveTimer: Timer?
@@ -90,7 +135,6 @@ final class PetMonitor: NSObject, ObservableObject {
         return .adult
     }
 
-    // Digital art pet faces using box-drawing / ASCII art
     var petFace: String {
         switch mood {
         case .dead:     return "x_x"
@@ -143,8 +187,6 @@ final class PetMonitor: NSObject, ObservableObject {
     func startMonitoring() {
         if let saved = PetStorage.shared.load() {
             pet = saved
-            // Apply offline decay
-            applyOfflineDecay()
         }
 
         decayTimer?.invalidate()
@@ -164,11 +206,6 @@ final class PetMonitor: NSObject, ObservableObject {
         }
     }
 
-    private func applyOfflineDecay() {
-        guard pet.isAlive, !pet.isSleeping else { return }
-        // Simplified: no offline decay to keep things fun
-    }
-
     private func decayStats() {
         guard pet.isAlive else { return }
 
@@ -181,12 +218,10 @@ final class PetMonitor: NSObject, ObservableObject {
             return
         }
 
-        // Decay rates per minute
         pet.hunger = max(0, pet.hunger - 1)
         pet.happiness = max(0, pet.happiness - 1)
         pet.energy = max(0, pet.energy - 1)
 
-        // Death check
         if pet.hunger == 0 && pet.happiness == 0 && pet.energy == 0 {
             pet.isAlive = false
             showFeedback("Your pet has passed away...")
@@ -247,6 +282,29 @@ final class PetMonitor: NSObject, ObservableObject {
         }
     }
 
+    // MARK: Updates
+
+    func checkForUpdates() {
+        isCheckingUpdate = true; updateStatus = ""
+        guard let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases/latest") else {
+            isCheckingUpdate = false; updateStatus = "Invalid URL"; return
+        }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            DispatchQueue.main.async {
+                self.isCheckingUpdate = false
+                guard let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tag  = json["tag_name"] as? String else {
+                    self.updateStatus = "Could not check for updates"; return
+                }
+                let latest = tag.trimmingCharacters(in: .init(charactersIn: "v"))
+                self.updateStatus = latest == appVersion
+                    ? "✓ v\(appVersion) — up to date"
+                    : "↑ v\(latest) available — download at GitHub"
+            }
+        }.resume()
+    }
+
     deinit {
         decayTimer?.invalidate()
         saveTimer?.invalidate()
@@ -291,35 +349,45 @@ struct StatBar: View {
     }
 }
 
+// MARK: - Shared Toolbar
+
+private func makeToolbar(monitor: PetMonitor) -> some View {
+    HStack(spacing: 8) {
+        HStack(spacing: 6) {
+            Image(systemName: "pawprint.fill")
+                .font(.callout).foregroundStyle(.blue)
+            Text(appName)
+                .font(.callout).fontWeight(.semibold)
+        }
+        Spacer()
+        ForEach(ViewMode.allCases, id: \.self) { mode in
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { monitor.currentView = mode }
+            } label: {
+                Image(systemName: mode.icon)
+                    .font(.callout)
+                    .foregroundStyle(monitor.currentView == mode ? .primary : .secondary)
+                    .padding(8)
+                    .background(monitor.currentView == mode ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .cursor(.pointingHand)
+        }
+    }
+    .padding(.horizontal, 14).padding(.vertical, 10)
+}
+
 // MARK: - Pet View
 
 struct PetView: View {
     @ObservedObject var monitor: PetMonitor
-    @State private var petNameEdit: String = ""
-    @State private var showRename: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(monitor.pet.name)
-                        .font(.headline)
-                    Text("\(monitor.age.label) \(monitor.mood.rawValue)")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button { withAnimation { monitor.currentView = .settings } } label: {
-                    Image(systemName: "gearshape").foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-
+            makeToolbar(monitor: monitor)
             Divider()
 
-            // Pet display — digital art style
             VStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12)
@@ -343,10 +411,9 @@ struct PetView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
 
-                // Stats
                 VStack(spacing: 6) {
                     StatBar(label: "Hunger", value: monitor.pet.hunger, icon: "fork.knife", color: .green)
-                    StatBar(label: "Happy", value: monitor.pet.happiness, icon: "heart.fill", color: .pink)
+                    StatBar(label: "Happy",  value: monitor.pet.happiness, icon: "heart.fill", color: .pink)
                     StatBar(label: "Energy", value: monitor.pet.energy, icon: "bolt.fill", color: .yellow)
                 }
                 .padding(.horizontal, 14)
@@ -354,27 +421,18 @@ struct PetView: View {
 
             Spacer()
 
-            // Actions
             if monitor.pet.isAlive {
                 HStack(spacing: 12) {
                     if monitor.pet.isSleeping {
-                        actionButton("Wake", icon: "sun.max.fill", color: .yellow) {
-                            monitor.wake()
-                        }
+                        actionButton("Wake", icon: "sun.max.fill", color: .yellow) { monitor.wake() }
                     } else {
-                        actionButton("Feed", icon: "fork.knife", color: .green) {
-                            monitor.feed()
-                        }
-                        actionButton("Play", icon: "gamecontroller.fill", color: .pink) {
-                            monitor.play()
-                        }
-                        actionButton("Sleep", icon: "moon.fill", color: .indigo) {
-                            monitor.sleep()
-                        }
+                        actionButton("Feed", icon: "fork.knife", color: .green) { monitor.feed() }
+                        actionButton("Play", icon: "gamecontroller.fill", color: .pink) { monitor.play() }
+                        actionButton("Sleep", icon: "moon.fill", color: .indigo) { monitor.sleep() }
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.bottom, 12)
+                .padding(.bottom, 10)
             } else {
                 Button {
                     monitor.revive()
@@ -384,38 +442,39 @@ struct PetView: View {
                         Text("Revive Pet")
                     }
                     .font(.callout.weight(.medium))
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 20).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.red))
                     .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
-                .padding(.bottom, 12)
+                .cursor(.pointingHand)
+                .padding(.bottom, 10)
             }
 
             Divider()
 
             HStack {
-                Text("v2.0 • Care: \(monitor.pet.totalCareActions)")
+                Text("v\(appVersion) · Care: \(monitor.pet.totalCareActions)")
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+                    .buttonStyle(.plain).font(.caption2).foregroundStyle(.tertiary)
+                    .cursor(.pointingHand)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 14).padding(.vertical, 8)
         }
-        .frame(width: 320, height: 420)
-        .id(monitor.animationFrame)  // Force redraw on animation
+        .id(monitor.animationFrame)
     }
 
     private var petColor: Color {
         switch monitor.mood {
-        case .dead: return .gray
+        case .dead:     return .gray
         case .sleeping: return Color(hex: "7777aa")
-        case .happy: return Color(hex: "00ff88")
-        case .content: return Color(hex: "88ccff")
-        case .hungry: return Color(hex: "ffaa00")
-        case .sad: return Color(hex: "ff6688")
-        case .tired: return Color(hex: "aaaacc")
+        case .happy:    return Color(hex: "00ff88")
+        case .content:  return Color(hex: "88ccff")
+        case .hungry:   return Color(hex: "ffaa00")
+        case .sad:      return Color(hex: "ff6688")
+        case .tired:    return Color(hex: "aaaacc")
         }
     }
 
@@ -423,10 +482,8 @@ struct PetView: View {
     private func actionButton(_ label: String, icon: String, color: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.title3)
-                Text(label)
-                    .font(.system(size: 10, weight: .medium))
+                Image(systemName: icon).font(.title3)
+                Text(label).font(.system(size: 10, weight: .medium))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
@@ -434,6 +491,7 @@ struct PetView: View {
             .foregroundStyle(color)
         }
         .buttonStyle(.plain)
+        .cursor(.pointingHand)
     }
 }
 
@@ -442,105 +500,145 @@ struct PetView: View {
 struct SettingsView: View {
     @ObservedObject var monitor: PetMonitor
     @State private var newName: String = ""
+    @State private var showResetConfirm: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Button { withAnimation { monitor.currentView = .pet } } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left").font(.callout)
-                        Text("Back").font(.callout)
-                    }.foregroundStyle(Color.accentColor)
-                }
-                .buttonStyle(.plain)
-                Spacer()
-                Text("Settings").font(.headline)
-                Spacer()
-                Text("Back").font(.callout).opacity(0)
-            }
-            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
-
+            makeToolbar(monitor: monitor)
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    section("PET") {
-                        HStack {
-                            TextField("Pet name", text: $newName)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.callout)
-                                .onAppear { newName = monitor.pet.name }
-                            Button("Rename") {
-                                guard !newName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                                monitor.pet.name = newName.trimmingCharacters(in: .whitespaces)
-                                PetStorage.shared.save(monitor.pet)
-                            }
-                            .controlSize(.small)
-                        }
+                VStack(alignment: .leading, spacing: 24) {
 
-                        HStack {
-                            Text("Age: \(monitor.age.label)")
-                                .font(.callout)
-                            Spacer()
-                            let days = Calendar.current.dateComponents([.day], from: monitor.pet.birthDate, to: Date()).day ?? 0
-                            Text("\(days) days old")
+                    // 1 — Pet
+                    settingSection("Pet") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                TextField("Pet name", text: $newName)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.callout)
+                                    .onAppear { newName = monitor.pet.name }
+                                Button("Rename") {
+                                    let trimmed = newName.trimmingCharacters(in: .whitespaces)
+                                    guard !trimmed.isEmpty else { return }
+                                    monitor.pet.name = trimmed
+                                    PetStorage.shared.save(monitor.pet)
+                                }
+                                .controlSize(.small)
+                            }
+
+                            HStack {
+                                Text("Age: \(monitor.age.label)").font(.callout)
+                                Spacer()
+                                let days = Calendar.current.dateComponents([.day], from: monitor.pet.birthDate, to: Date()).day ?? 0
+                                Text("\(days) days old")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+
+                            if showResetConfirm {
+                                HStack(spacing: 8) {
+                                    Text("Reset current pet?").font(.caption).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Cancel") { showResetConfirm = false }
+                                        .buttonStyle(.bordered).controlSize(.small)
+                                    Button("Reset") {
+                                        monitor.resetPet(name: "Pixel")
+                                        newName = "Pixel"
+                                        showResetConfirm = false
+                                    }
+                                    .buttonStyle(.borderedProminent).controlSize(.small)
+                                    .tint(.red)
+                                }
+                            } else {
+                                Button("Reset Pet (New Pet)") { showResetConfirm = true }
+                                    .foregroundStyle(.red)
+                                    .font(.callout)
+                                    .cursor(.pointingHand)
+                            }
+                        }
+                    }
+
+                    // 2 — Appearance
+                    settingSection("Appearance") {
+                        VStack(alignment: .leading, spacing: 16) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Theme").font(.callout).fontWeight(.medium)
+                                Picker("", selection: $monitor.appTheme) {
+                                    ForEach(AppTheme.allCases, id: \.rawValue) {
+                                        Text($0.rawValue).tag($0.rawValue.lowercased())
+                                    }
+                                }
+                                .pickerStyle(.segmented).labelsHidden()
+                            }
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Color Preset").font(.callout).fontWeight(.medium)
+                                Picker("", selection: $monitor.colorPreset) {
+                                    ForEach(ColorPreset.allCases, id: \.rawValue) {
+                                        Text($0.rawValue).tag($0.rawValue)
+                                    }
+                                }
+                                .pickerStyle(.segmented).labelsHidden()
+                            }
+                        }
+                    }
+
+                    // 3 — Updates
+                    settingSection("Updates") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button(monitor.isCheckingUpdate ? "Checking…" : "Check for Updates") {
+                                monitor.checkForUpdates()
+                            }
+                            .disabled(monitor.isCheckingUpdate)
+                            if !monitor.updateStatus.isEmpty {
+                                Text(monitor.updateStatus)
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    // 4 — About
+                    settingSection("About") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text("\(appName) v\(appVersion)").font(.callout).fontWeight(.medium)
+                                Spacer()
+                                Link("Changelog ↗",
+                                     destination: URL(string: "https://github.com/\(githubRepo)/commits/main/")!)
+                                    .font(.caption)
+                            }
+                            Text(appTagline)
                                 .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("All data stored locally. Nothing leaves your Mac.")
+                                .font(.caption2).foregroundStyle(.tertiary)
                         }
-                    }
-
-                    section("DANGER ZONE") {
-                        Button("Reset Pet (New Pet)") {
-                            let alert = NSAlert()
-                            alert.messageText = "Reset your pet?"
-                            alert.informativeText = "This will create a new pet. Your current pet will be lost."
-                            alert.alertStyle = .warning
-                            alert.addButton(withTitle: "Reset")
-                            alert.addButton(withTitle: "Cancel")
-                            if alert.runModal() == .alertFirstButtonReturn {
-                                monitor.resetPet(name: "Pixel")
-                                newName = "Pixel"
-                            }
-                        }
-                        .foregroundStyle(.red)
-                        .font(.callout)
-                    }
-
-                    section("APPEARANCE") {
-                        Picker("Theme", selection: $monitor.appTheme) {
-                            ForEach(AppTheme.allCases, id: \.rawValue) {
-                                Text($0.rawValue.capitalized).tag($0.rawValue)
-                            }
-                        }
-                        .pickerStyle(.segmented).labelsHidden()
-                    }
-
-                    section("ABOUT") {
-                        Text("Digigoci v1.0").font(.callout)
-                        Text("A digital art Tamagotchi living in your menu bar.")
-                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                .padding(16)
+                .padding(20)
             }
 
             Divider()
-
             HStack {
                 Spacer()
-                Button("Quit Digigoci") { NSApplication.shared.terminate(nil) }
-                    .buttonStyle(.plain).font(.callout).foregroundStyle(.secondary)
+                Button("Quit \(appName)") { NSApplication.shared.terminate(nil) }
+                    .buttonStyle(.bordered).controlSize(.small).foregroundStyle(.secondary)
                 Spacer()
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
         }
-        .frame(width: 320, height: 420)
     }
 
     @ViewBuilder
-    private func section<C: View>(_ label: String, @ViewBuilder content: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(label).font(.caption2).fontWeight(.semibold).foregroundStyle(.secondary)
+    private func settingSection<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.caption).fontWeight(.bold)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
             content()
+                .padding(16)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(10)
         }
     }
 }
@@ -549,24 +647,31 @@ struct SettingsView: View {
 
 struct ContentView: View {
     @ObservedObject var monitor: PetMonitor
+    @Environment(\.colorScheme) var colorScheme
 
     var body: some View {
         Group {
             switch monitor.currentView {
-            case .pet: PetView(monitor: monitor)
+            case .pet:      PetView(monitor: monitor)
             case .settings: SettingsView(monitor: monitor)
             }
         }
-        .onAppear { applyTheme() }
-        .onChange(of: monitor.appTheme) { _ in applyTheme() }
+        .background(themedBackground)
+        .onAppear  { applyTheme() }
+        .onChange(of: monitor.appTheme)    { _ in applyTheme() }
+        .onChange(of: monitor.colorPreset) { _ in applyTheme() }
+    }
+
+    private var themedBackground: Color {
+        guard monitor.colorPreset == ColorPreset.tokyoNight.rawValue else { return .clear }
+        return colorScheme == .dark ? Color(hex: "24283b") : Color(hex: "e6e7ed")
     }
 
     private func applyTheme() {
-        switch monitor.appTheme {
-        case "light": NSApp.appearance = NSAppearance(named: .aqua)
-        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
-        default:      NSApp.appearance = nil
-        }
+        let t = AppTheme(rawValue: monitor.appTheme.capitalized) ?? .system
+        NSApp.appearance = t == .light ? NSAppearance(named: .aqua)
+                         : t == .dark  ? NSAppearance(named: .darkAqua)
+                         : nil
     }
 }
 
@@ -579,6 +684,7 @@ struct DigigociApp: App {
     var body: some Scene {
         MenuBarExtra {
             ContentView(monitor: monitor)
+                .frame(width: 320, height: 440)
         } label: {
             HStack(spacing: 3) {
                 Text(menuEmoji)
@@ -591,13 +697,13 @@ struct DigigociApp: App {
 
     private var menuEmoji: String {
         switch monitor.mood {
-        case .dead: return "💀"
+        case .dead:     return "💀"
         case .sleeping: return "😴"
-        case .happy: return "😸"
-        case .content: return "🐱"
-        case .hungry: return "😿"
-        case .sad: return "😢"
-        case .tired: return "🥱"
+        case .happy:    return "😸"
+        case .content:  return "🐱"
+        case .hungry:   return "😿"
+        case .sad:      return "😢"
+        case .tired:    return "🥱"
         }
     }
 }
